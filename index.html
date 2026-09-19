@@ -2065,7 +2065,7 @@ document.addEventListener("DOMContentLoaded",function(){
 
 <script>
 const classes=["ECE","Nursery","Class 1","Class 2","Class 3","Class 4","Class 5"];
-let db=JSON.parse(localStorage.getItem("edufunds_db")||"null")||{transactions:[],students:[],results:{},classes:{},attendance:{},opening:{BAHBOOD:0,NSB:0,FTF:0},settings:{schoolName:"GPS NO.2 MULTAN KHURD",academicYear:"2026-27",adminName:"Administrator"}};
+let db=JSON.parse(localStorage.getItem("edufunds_db")||"null")||{transactions:[],students:[],opening:{BAHBOOD:0,NSB:0,FTF:0},settings:{schoolName:"GPS NO.2 MULTAN KHURD",academicYear:"2026-27",adminName:"Administrator"}};
 
 const firebaseConfig = {
   apiKey: "AIzaSyAs2-gEVjfz3WJWKdAscanfsmMYADvkhio",
@@ -2103,9 +2103,6 @@ function normalizeCloudData(x){
   if(!Array.isArray(x.transactions)) x.transactions=[];
   if(!Array.isArray(x.students)) x.students=[];
   if(!Array.isArray(x.studentHistory)) x.studentHistory=[];
-  if(!x.results) x.results={};
-  if(!x.classes) x.classes={};
-  if(!x.attendance) x.attendance={};
   if(!x.opening) x.opening={BAHBOOD:0,NSB:0,FTF:0};
   if(x.opening.BAHBOOD===undefined) x.opening.BAHBOOD=0;
   if(x.opening.NSB===undefined) x.opening.NSB=0;
@@ -2128,29 +2125,13 @@ function buildFirebaseData(){
       NSB:fundBlock("NSB"),
       FTF:fundBlock("FTF")
     },
-    classes:db.classes||{},
     students:Array.isArray(db.students)?db.students:[],
     studentHistory:Array.isArray(db.studentHistory)?db.studentHistory:[],
-    results:db.results||{},
-    attendance:db.attendance||{},
     settings:db.settings||{},
     login:{username:getSchoolUsername(),password:getSchoolPassword()},
     appData:db
   };
 }
-
-// Firebase school database upgrade structure
-function prepareSchoolDatabase(){
-  db.classes=db.classes||{};
-  db.results=db.results||{};
-  db.attendance=db.attendance||{};
-  classes.forEach(c=>{
-    if(!db.classes[c]) db.classes[c]={students:[]};
-  });
-  if(!db.studentHistory) db.studentHistory=[];
-  localStorage.setItem("edufunds_db",JSON.stringify(db));
-}
-prepareSchoolDatabase();
 
 function saveToRealtimeDatabase(){
   if(!firebaseStarted || !schoolDataRef || loadingRemoteData) return;
@@ -2214,8 +2195,14 @@ if(db.studentHistory.length===0 && Array.isArray(db.students) && db.students.len
 let currentClass="Class 1";
 const $=id=>document.getElementById(id), money=n=>Number(n||0).toLocaleString("en-PK");
 
-/* Keep detailed student records. Do not convert students into strength-only records. */
-if(!Array.isArray(db.students)) db.students=[];
+/* Convert older detailed student records to class strength records once */
+if(Array.isArray(db.students) && db.students.some(s=>("name" in s)||("gender" in s))){
+  db.students=classes.map(c=>{
+    let old=db.students.filter(s=>s.className===c);
+    return {id:"strength_"+c,className:c,boys:old.filter(s=>s.gender==="Male").length,girls:old.filter(s=>s.gender==="Female").length};
+  });
+  persist();
+}
 if(db.opening && db.opening.FTF===undefined){db.opening.FTF=0;}
 function persist(){
   localStorage.setItem("edufunds_db",JSON.stringify(db));
@@ -2323,38 +2310,16 @@ function saveStudent(){
   let father=$("sFather").value.trim();
   let gender=$("sGender").value;
   if(!name || !father) return alert("Student name and father name are required.");
-
-  // One Firebase record only: Class > Student Name
   let existing=db.students.find(s=>s.className===className);
-  if(!existing){existing={id:"class_"+className,className,students:[]};db.students.push(existing);}
+  if(!existing){existing={id:String(Date.now()),className,students:[]};db.students.push(existing);}
   if(!Array.isArray(existing.students)) existing.students=[];
-
-  // Prevent duplicate student in same class
-  let duplicate=existing.students.find(x=>String(x.name).toLowerCase()===name.toLowerCase());
-  if(duplicate){
-    return alert("This student already exists in this class.");
-  }
-
-  existing.students.push({
-    id:name.replace(/\\s+/g,"_").toLowerCase(),
-    name,
-    father,
-    gender,
-    createdAt:new Date().toISOString()
-  });
-
+  existing.students.push({id:String(Date.now()),name,father,gender});
   if(!Array.isArray(db.studentHistory)) db.studentHistory=[];
   let boys=existing.students.filter(x=>x.gender==="Boy").length;
   let girls=existing.students.filter(x=>x.gender==="Girl").length;
-  db.studentHistory.push({id:"history_"+Date.now(),date:new Date().toISOString().slice(0,10),className,boys,girls});
-
-  persist();
-  currentClass=className;
-  closeModal("studentModal");
-  $("classView").style.display="none";
-  $("studentView").style.display="block";
-  render();
-  toast("Student saved successfully");
+  db.studentHistory.push({id:String(Date.now()),date:new Date().toISOString().slice(0,10),className,boys,girls});
+  persist();currentClass=className;closeModal("studentModal");
+  $("classView").style.display="none";$("studentView").style.display="block";render();toast("Student saved successfully");
 }
 function renderStudents(){
   let r=db.students.find(s=>s.className===currentClass)||{students:[]};
@@ -2848,29 +2813,6 @@ function openAddResult(studentId, studentName, openedClass){
  if(classBox){ classBox.innerHTML='<option>'+ (cls ? cls.toUpperCase() : 'Class Not Found') +'</option>'; }
  loadResultSubjects(studentId, cls);
 }
-// Firebase Result Sync Upgrade
-function saveResultsToFirebase(){
- try{
-  if(typeof firebase!=='undefined' && firebase.database){
-   if(!firebase.apps.length) firebase.initializeApp(firebaseConfig);
-   firebase.database().ref('school/main/results').set(window.resultRecords || []);
-  }
- }catch(e){ console.error('Firebase result sync error',e); }
-}
-function loadResultsFromFirebase(){
- try{
-  if(typeof firebase!=='undefined' && firebase.database){
-   if(!firebase.apps.length) firebase.initializeApp(firebaseConfig);
-   firebase.database().ref('school/main/results').once('value').then(s=>{
-    const v=s.val();
-    if(Array.isArray(v)){
-      window.resultRecords=v;
-      localStorage.setItem('resultRecords',JSON.stringify(v));
-    }
-   });
-  }
- }catch(e){ console.error('Firebase result load error',e); }
-}
 function saveResultRecord(studentId,name){
  const subject=document.getElementById('rSubject').value.trim();
  const date=document.getElementById('rDate').value;
@@ -2895,20 +2837,8 @@ function saveResultRecord(studentId,name){
  };
 
  window.resultRecords = window.resultRecords || [];
- // Prevent duplicate result records for same student, subject, exam type and date
- const duplicate = window.resultRecords.some(x =>
-   String(x.studentId)===String(r.studentId) &&
-   String(x.subject)===String(r.subject) &&
-   String(x.type)===String(r.type) &&
-   String(x.date)===String(r.date)
- );
- if(duplicate){
-   alert('This result already exists for this student.');
-   return;
- }
  window.resultRecords.push(r);
  localStorage.setItem('resultRecords',JSON.stringify(window.resultRecords));
- saveResultsToFirebase();
 
  alert('Result Saved Successfully');
 
@@ -3769,70 +3699,5 @@ window.addEventListener('load',addResultLogo);
   }
 }
 </style>
-<script>window.addEventListener("load",function(){ if(typeof loadResultsFromFirebase==="function") loadResultsFromFirebase(); });</script>
-<script>
-/* Firebase Students Module Upgrade */
-async function saveStudentToFirebase(studentData){
- try{
-   if(typeof firebase!=="undefined" && firebase.database){
-     if(!firebase.apps.length) firebase.initializeApp(firebaseConfig);
-     const ref=firebase.database().ref(
-       "school/main/students/"+studentData.className+"/"+studentData.id
-     );
-     await ref.set(studentData);
-   }
- }catch(e){console.error("Student Firebase save error:",e);}
-}
-
-async function loadStudentsFromFirebase(){
- try{
-   if(typeof firebase!=="undefined" && firebase.database){
-     if(!firebase.apps.length) firebase.initializeApp(firebaseConfig);
-     const snap=await firebase.database().ref("school/main/students").once("value");
-     const data=snap.val();
-     if(data){
-       const arr=[];
-       Object.keys(data).forEach(cls=>{
-         arr.push({
-           id: cls,
-           className: cls,
-           students: Object.values(data[cls]||{})
-         });
-       });
-       db.students=arr;
-       localStorage.setItem("edufunds_db",JSON.stringify(db));
-       render();
-     }
-   }
- }catch(e){console.error("Student Firebase load error:",e);}
-}
-
-/* keep old save and add Firebase sync */
-const oldSaveStudentFirebaseUpgrade=window.saveStudent;
-window.saveStudent=function(){
-  let className=document.getElementById("sClass")?.value;
-  let name=document.getElementById("sName")?.value.trim();
-  let father=document.getElementById("sFather")?.value.trim();
-  let gender=document.getElementById("sGender")?.value;
-  if(name && father){
-    const id=String(Date.now());
-    setTimeout(()=>{
-      saveStudentToFirebase({
-        id:id,
-        className:className,
-        name:name,
-        father:father,
-        gender:gender,
-        createdAt:new Date().toISOString()
-      });
-    },300);
-  }
-  return oldSaveStudentFirebaseUpgrade.apply(this,arguments);
-};
-
-window.addEventListener("load",function(){
-  setTimeout(loadStudentsFromFirebase,1500);
-});
-</script>
 </body>
 </html>
