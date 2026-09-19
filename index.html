@@ -2114,28 +2114,6 @@ function normalizeCloudData(x){
   return x;
 }
 
-
-function cleanStudentsData(){
-  // Keep only one clean class-wise student structure
-  let output=[];
-  let seen={};
-  if(!Array.isArray(db.students)) return output;
-  db.students.forEach(cls=>{
-    if(!cls || !cls.className) return;
-    let key=cls.className;
-    if(!seen[key]) { seen[key]=true; output.push({id:"class_"+key,className:key,students:[]}); }
-    let target=output.find(x=>x.className===key);
-    (Array.isArray(cls.students)?cls.students:[]).forEach(st=>{
-      if(!st || !st.name) return;
-      let id=String(st.name).trim().toLowerCase();
-      if(!target.students.some(x=>String(x.name).trim().toLowerCase()===id)){
-        target.students.push(st);
-      }
-    });
-  });
-  return output;
-}
-
 function buildFirebaseData(){
   const tx=Array.isArray(db.transactions)?db.transactions:[];
   const fundBlock=(fund)=>({
@@ -2151,13 +2129,13 @@ function buildFirebaseData(){
       FTF:fundBlock("FTF")
     },
     classes:db.classes||{},
-    students:cleanStudentsData(),
+    students:Array.isArray(db.students)?db.students:[],
     studentHistory:Array.isArray(db.studentHistory)?db.studentHistory:[],
     results:db.results||{},
     attendance:db.attendance||{},
     settings:db.settings||{},
     login:{username:getSchoolUsername(),password:getSchoolPassword()},
-    appData:{...db, students:cleanStudentsData()}
+    appData:db
   };
 }
 
@@ -2340,7 +2318,6 @@ function openStudent(c){
   $("studentModal").classList.add("show");
 }
 function saveStudent(){
-  db.students=cleanStudentsData();
   let className=$("sClass").value;
   let name=$("sName").value.trim();
   let father=$("sFather").value.trim();
