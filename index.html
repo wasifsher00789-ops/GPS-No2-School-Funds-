@@ -2100,6 +2100,9 @@ function setFirebaseStatus(text,type="loading"){
 
 function normalizeCloudData(x){
   if(!x || typeof x!=="object") return null;
+  if(x.students && !Array.isArray(x.students) && typeof x.students==="object"){
+    x.students=Object.values(x.students);
+  }
   if(!Array.isArray(x.transactions)) x.transactions=[];
   if(!Array.isArray(x.students)) x.students=[];
   if(!Array.isArray(x.studentHistory)) x.studentHistory=[];
@@ -2125,11 +2128,16 @@ function buildFirebaseData(){
       NSB:fundBlock("NSB"),
       FTF:fundBlock("FTF")
     },
-    students:Array.isArray(db.students)?db.students:[],
-    studentHistory:Array.isArray(db.studentHistory)?db.studentHistory:[],
     settings:db.settings||{},
     login:{username:getSchoolUsername(),password:getSchoolPassword()},
-    appData:db
+    appData:{
+      ...db,
+      students: (Array.isArray(db.students) ? db.students.reduce((obj, cls)=>{
+        obj[cls.className]=cls;
+        return obj;
+      },{}) : db.students),
+      studentHistory: db.studentHistory
+    }
   };
 }
 
@@ -2882,6 +2890,16 @@ function saveResultRecord(studentId,name){
  window.resultRecords = window.resultRecords || [];
  window.resultRecords.push(r);
  localStorage.setItem('resultRecords',JSON.stringify(window.resultRecords));
+
+ // Save ONLY Results to Firebase (separate path). Other modules remain unchanged.
+ try{
+   if(realtimeDB){
+     realtimeDB.ref("school/main/results/"+encodeURIComponent(r.name)+"/"+encodeURIComponent(r.type)+"/"+r.id).set(r)
+       .catch(err=>console.error("Result Firebase save error:",err));
+   }
+ }catch(err){
+   console.error("Result Firebase error:",err);
+ }
 
  alert('Result Saved Successfully');
 
