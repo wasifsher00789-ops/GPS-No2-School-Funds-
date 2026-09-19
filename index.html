@@ -2434,10 +2434,34 @@ function studentHistoryInRange(){
 }
 
 function latestStrengthOnOrBefore(className,date){
-  let arr=(db.studentHistory||[]).filter(x=>x.className===className&&(!date||x.date<=date)).sort((a,b)=>a.date.localeCompare(b.date));
+  // Live current student data should be the source for current strength.
+  // Promotion removes the student from old class and adds to new class.
+  const today=new Date().toISOString().slice(0,10);
+  const useLive = !date || date >= today || date === $("rTo")?.value;
+  if(useLive){
+    let cur=db.students.find(s=>s.className===className);
+    if(cur && Array.isArray(cur.students)){
+      return {
+        className,
+        boys:cur.students.filter(x=>x.gender==="Boy").length,
+        girls:cur.students.filter(x=>x.gender==="Girl").length,
+        date:today
+      };
+    }
+  }
+
+  let arr=(db.studentHistory||[])
+    .filter(x=>x.className===className&&(!date||x.date<=date))
+    .sort((a,b)=>a.date.localeCompare(b.date));
   if(arr.length)return arr[arr.length-1];
+
   let cur=db.students.find(s=>s.className===className);
-  return cur?{className,boys:Number(cur.boys||0),girls:Number(cur.girls||0),date:""}:{className,boys:0,girls:0,date:""};
+  return cur?{
+    className,
+    boys:Array.isArray(cur.students)?cur.students.filter(x=>x.gender==="Boy").length:0,
+    girls:Array.isArray(cur.students)?cur.students.filter(x=>x.gender==="Girl").length:0,
+    date:""
+  }:{className,boys:0,girls:0,date:""};
 }
 
 function renderFinancialReports(){
@@ -2480,18 +2504,30 @@ function renderFinancialReports(){
 
 function renderStudentReports(){
   let from=$("rFrom").value,to=$("rTo").value;
-  let endDate=to||new Date().toISOString().slice(0,10);
-  let startDate=from||"0000-01-01";
+
+  // Live strength from current student records (after promotion)
+  // Promoted students are counted only in their current class.
+  let liveMap={};
+  classes.forEach(c=>liveMap[c]={boys:0,girls:0});
+  (db.students||[]).forEach(group=>{
+    let c=group.className;
+    if(!liveMap[c]) liveMap[c]={boys:0,girls:0};
+    (group.students||[]).forEach(st=>{
+      if(st.gender==="Girl") liveMap[c].girls++;
+      else liveMap[c].boys++;
+    });
+  });
 
   let rows=classes.map(c=>{
-    let start=latestStrengthOnOrBefore(c,startDate);
-    let end=latestStrengthOnOrBefore(c,endDate);
+    let live=liveMap[c]||{boys:0,girls:0};
+    let start=latestStrengthOnOrBefore(c,from||"0000-01-01");
     return {
       className:c,
       startB:Number(start.boys||0),startG:Number(start.girls||0),
-      endB:Number(end.boys||0),endG:Number(end.girls||0)
+      endB:Number(live.boys||0),endG:Number(live.girls||0)
     };
   });
+
   rows.forEach(r=>{r.startT=r.startB+r.startG;r.endT=r.endB+r.endG;r.change=r.endT-r.startT});
 
   let totalB=rows.reduce((s,r)=>s+r.endB,0);
@@ -2525,8 +2561,15 @@ function renderStudentReports(){
     return `<tr><td><b>${r.className}</b></td><td>${r.startB}</td><td>${r.startG}</td><td>${r.startT}</td><td>${r.endB}</td><td>${r.endG}</td><td><b>${r.endT}</b></td><td class="${cls}">${r.change>0?"+":""}${r.change}</td><td>${p}%</td></tr>`;
   }).join("");
 
-  let hist=studentHistoryInRange().slice().sort((a,b)=>b.date.localeCompare(a.date));
-  $("studentHistoryTable").innerHTML=hist.length?hist.map(x=>`<tr><td>${x.date}</td><td>${x.className}</td><td>${Number(x.boys||0)}</td><td>${Number(x.girls||0)}</td><td><b>${Number(x.boys||0)+Number(x.girls||0)}</b></td></tr>`).join(""):empty(5,"No student-strength changes recorded in this period.");
+  // Live display only: do not save student strength history separately.
+  // This section reads current students data and shows the current strength snapshot.
+  let hist=rows.map(r=>({
+    date:new Date().toISOString().slice(0,10),
+    className:r.className,
+    boys:r.endB,
+    girls:r.endG
+  }));
+  $("studentHistoryTable").innerHTML=hist.length?hist.map(x=>`<tr><td>${x.date}</td><td>${x.className}</td><td>${Number(x.boys||0)}</td><td>${Number(x.girls||0)}</td><td><b>${Number(x.boys||0)+Number(x.girls||0)}</b></td></tr>`).join(""):empty(5,"No live student data available.");
 }
 
 function renderReports(){
