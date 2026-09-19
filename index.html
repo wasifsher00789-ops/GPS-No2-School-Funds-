@@ -2100,9 +2100,6 @@ function setFirebaseStatus(text,type="loading"){
 
 function normalizeCloudData(x){
   if(!x || typeof x!=="object") return null;
-  if(x.students && !Array.isArray(x.students) && typeof x.students==="object"){
-    x.students=Object.values(x.students);
-  }
   if(!Array.isArray(x.transactions)) x.transactions=[];
   if(!Array.isArray(x.students)) x.students=[];
   if(!Array.isArray(x.studentHistory)) x.studentHistory=[];
@@ -2130,14 +2127,7 @@ function buildFirebaseData(){
     },
     settings:db.settings||{},
     login:{username:getSchoolUsername(),password:getSchoolPassword()},
-    appData:{
-      ...db,
-      students: (Array.isArray(db.students) ? db.students.reduce((obj, cls)=>{
-        obj[cls.className]=cls;
-        return obj;
-      },{}) : db.students),
-      studentHistory: db.studentHistory
-    }
+    appData:db
   };
 }
 
