@@ -2146,7 +2146,7 @@ function saveToRealtimeDatabase(){
   clearTimeout(firebaseWriteTimer);
   firebaseWriteTimer=setTimeout(()=>{
     setFirebaseStatus("Saving...","loading");
-    schoolDataRef.set(buildFirebaseData())
+    schoolDataRef.update(buildFirebaseData())
       .then(()=>{setFirebaseStatus("Live","online");toast("Firebase پر Successfully Save ہو گیا");})
       .catch(err=>{console.error("Realtime Database save error:",err);setFirebaseStatus("Save Error","error");toast("Firebase Save Error — Data save نہیں ہوا");});
   },200);
@@ -2177,7 +2177,7 @@ function startRealtimeDatabase(){
             render();
           }
         }else{
-          schoolDataRef.set(buildFirebaseData());
+          schoolDataRef.update(buildFirebaseData());
         }
         setFirebaseStatus("Live","online");
       }catch(err){
@@ -2196,10 +2196,6 @@ function startRealtimeDatabase(){
 }
 
 if(!Array.isArray(db.studentHistory)) db.studentHistory=[];
-if(db.studentHistory.length===0 && Array.isArray(db.students) && db.students.length){
-  const today=new Date().toISOString().slice(0,10);
-  db.students.forEach(s=>db.studentHistory.push({id:"init_"+s.className,date:today,className:s.className,boys:Number(s.boys||0),girls:Number(s.girls||0)}));
-}
 let currentClass="Class 1";
 const $=id=>document.getElementById(id), money=n=>Number(n||0).toLocaleString("en-PK");
 
@@ -2305,7 +2301,7 @@ function saveTx(){
 }
 function deleteTx(id){if(confirm("Delete this transaction permanently?")){db.transactions=db.transactions.filter(t=>t.id!==id);persist();render();toast("Transaction deleted")}}
 function renderAllTx(){if(!$("allTxBody"))return;let q=$("txSearch").value.toLowerCase(),f=$("txFund").value,y=$("txType").value,a=db.transactions.filter(t=>(!f||t.fund===f)&&(!y||t.type===y)&&(!q||(t.description+" "+t.voucher+" "+t.category).toLowerCase().includes(q)));$("allTxBody").innerHTML=a.length?a.slice().sort((a,b)=>b.date.localeCompare(a.date)).map(t=>`<tr><td>${t.date}</td><td>${t.fund}</td><td>${t.category}</td><td>${esc(t.description)}</td><td>${esc(t.voucher||"-")}</td><td><span class="pill ${t.type}">${t.type}</span></td><td>Rs. ${money(t.amount)}</td><td><button class="btn red sm" onclick="deleteTx('${t.id}')">Delete</button></td></tr>`).join(""):empty(8)}
-function openClass(c){currentClass=c;go("students");$("classView").style.display="none";$("studentView").style.display="block";renderStudents()}
+function openClass(c){window.scrollTo(0,0);currentClass=c;go("students");$("classView").style.display="none";$("studentView").style.display="block";renderStudents()}
 function backClasses(){$("studentView").style.display="none";$("classView").style.display="block";render()}
 function openStudent(c){
   $("sClass").innerHTML=classes.map(x=>`<option ${x===(c||currentClass)?"selected":""}>${x}</option>`).join("");
@@ -2325,7 +2321,15 @@ function saveStudent(){
   if(!Array.isArray(db.studentHistory)) db.studentHistory=[];
   let boys=existing.students.filter(x=>x.gender==="Boy").length;
   let girls=existing.students.filter(x=>x.gender==="Girl").length;
-  db.studentHistory.push({id:String(Date.now()),date:new Date().toISOString().slice(0,10),className,boys,girls});
+  if(!Array.isArray(db.studentHistory)) db.studentHistory=[];
+  let historyIndex=db.studentHistory.findIndex(h=>h.className===className);
+  if(historyIndex>=0){
+    db.studentHistory[historyIndex].boys=boys;
+    db.studentHistory[historyIndex].girls=girls;
+    db.studentHistory[historyIndex].date=new Date().toISOString().slice(0,10);
+  }else{
+    db.studentHistory.push({id:className,date:new Date().toISOString().slice(0,10),className,boys,girls});
+  }
   persist();currentClass=className;closeModal("studentModal");
   $("classView").style.display="none";$("studentView").style.display="block";render();toast("Student saved successfully");
 }
@@ -2783,6 +2787,7 @@ function renderResults(){
  box.innerHTML=classes.map(c=>`<div class="class-card" onclick="openResultClass('${c}')"><div class="class-icon">${c.charAt(0)}</div><h3>${c}</h3><p>Open Students</p></div>`).join("");
 }
 function openResultClass(c){
+ window.scrollTo(0,0);
  const box=document.getElementById("resultClasses");
  const list=document.getElementById("resultStudents");
  box.style.display="none";
