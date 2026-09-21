@@ -2161,6 +2161,9 @@ function startRealtimeDatabase(){
     setFirebaseStatus("Connecting...","loading");
 
     schoolDataRef.on("value",snap=>{
+      // During a promotion we intentionally make more than one Firebase change.
+      // Ignore intermediate snapshots so old appData cannot overwrite the in-memory move.
+      if(typeof promotionInProgress!=="undefined" && promotionInProgress) return;
       try{
         if(snap.exists()){
           const raw=snap.val();
@@ -2344,41 +2347,325 @@ function renderStudents(){
 <button class="btn red sm" onclick="deleteStudent('${st.id}')">Delete</button></td></tr>`).join(""):empty(5);
 }
 
-function promoteStudent(id){
-  const order=["ECE","Nursery","Class 1","Class 2","Class 3","Class 4","Class 5"];
-  let source=db.students.find(s=>s.className===currentClass);
-  if(!source || !Array.isArray(source.students)) return;
-  let student=source.students.find(s=>s.id===id);
-  if(!student) return;
+function updateStudentHistoryCount(className, studentList){
+  if(!Array.isArray(db.studentHistory)) db.studentHistory=[];
+  let boys=studentList.filter(s=>s.gender==="Boy" || s.gender==="Boys").length;
+  let girls=studentList.filter(s=>s.gender==="Girl" || s.gender==="Girls").length;
+  let h=db.studentHistory.find(x=>x.className===className);
+  if(h){
+    h.boys=boys; h.girls=girls; h.total=boys+girls;
+    h.date=new Date().toISOString().slice(0,10);
+  }else{
+    db.studentHistory.push({id:className,className,boys,girls,total:boys+girls,date:new Date().toISOString().slice(0,10)});
+  }
+}
 
-  let idx=order.indexOf(source.className);
+function removeStudentResults(student, className){
+  if(!db.results) db.results={};
+
+  // New result structure: results / class / student
+  if(className && db.results[className] && student && student.name){
+    delete db.results[className][student.name];
+  }
+
+  // Keep cleanup for any old remaining formats
+  function cleanResults(node){
+    if(!node || typeof node!=="object") return;
+    Object.keys(node).forEach(key=>{
+      let item=node[key];
+      if(key===student.name || (item && typeof item==="object" &&
+        (item.name===student.name || String(item.studentId)===String(student.id)))){
+          delete node[key];
+          return;
+      }
+      if(item && typeof item==="object") cleanResults(item);
+    });
+  }
+  cleanResults(db.results);
+
+  try{
+    if(realtimeDB && className && student.name){
+      realtimeDB.ref("school/main/results")
+        .child(className)
+        .child(student.name)
+        .remove();
+    }
+  }catch(e){
+    console.log("Result delete error:",e);
+  }
+}
+
+
+async function removeStudentClassResults(student, className){
+  if(!db.results) db.results={};
+
+  // Result form stores className in UPPERCASE (e.g. NURSERY / CLASS 1),
+  // while the Students module uses Nursery / Class 1. Clean local variants.
+  const wantedClass=String(className||"").trim().toLowerCase();
+  Object.keys(db.results||{}).forEach(classKey=>{
+    if(String(decodeURIComponent(classKey)).trim().toLowerCase()!==wantedClass) return;
+    const branch=db.results[classKey];
+    if(!branch || typeof branch!=="object") return;
+    Object.keys(branch).forEach(studentKey=>{
+      const item=branch[studentKey];
+      let matchName=false;
+      try{ matchName=decodeURIComponent(studentKey)===student.name; }catch(_){ matchName=studentKey===student.name; }
+      if(matchName || (item && typeof item==="object" &&
+        (item.name===student.name || String(item.studentId)===String(student.id)))){
+        delete branch[studentKey];
+      }
+    });
+  });
+
+  if(!realtimeDB || !className || !student.name) return;
+
+  const resultRoot=realtimeDB.ref("school/main/results");
+  const snap=await resultRoot.once("value");
+  if(!snap.exists()) return;
+
+  const all=snap.val()||{};
+  const removals={};
+
+  // Find the REAL saved class key instead of assuming its letter case.
+  // This handles ECE, NURSERY, CLASS 1... exactly as the result form saved them.
+  Object.keys(all).forEach(classKey=>{
+    let decodedClass=classKey;
+    try{ decodedClass=decodeURIComponent(classKey); }catch(_){}
+    if(String(decodedClass).trim().toLowerCase()!==wantedClass) return;
+
+    const students=all[classKey];
+    if(!students || typeof students!=="object") return;
+
+    Object.keys(students).forEach(studentKey=>{
+      let decodedName=studentKey;
+      try{ decodedName=decodeURIComponent(studentKey); }catch(_){}
+      const studentNode=students[studentKey];
+      let matched=String(decodedName)===String(student.name);
+
+      // Also verify by studentId anywhere below the student's result branch.
+      if(!matched && studentNode && typeof studentNode==="object"){
+        outer: for(const typeKey of Object.keys(studentNode)){
+          const typeNode=studentNode[typeKey];
+          if(!typeNode || typeof typeNode!=="object") continue;
+          for(const recordKey of Object.keys(typeNode)){
+            const rec=typeNode[recordKey];
+            if(rec && typeof rec==="object" && String(rec.studentId)===String(student.id)){
+              matched=true;
+              break outer;
+            }
+          }
+        }
+      }
+
+      if(matched) removals[classKey+"/"+studentKey]=null;
+    });
+  });
+
+  if(Object.keys(removals).length){
+    await resultRoot.update(removals);
+  }
+}
+let promotionInProgress=false;
+async function promoteStudent(id){
+  if(promotionInProgress) return;
+
+  const order=["ECE","Nursery","Class 1","Class 2","Class 3","Class 4","Class 5"];
+
+  // IMPORTANT: locate the student's REAL current class by ID every time.
+  // Do not rely on the open UI class (currentClass), which can be stale after promotion.
+  let source=null;
+  let student=null;
+  for(const cls of (Array.isArray(db.students)?db.students:[])){
+    if(!Array.isArray(cls.students)) continue;
+    const found=cls.students.find(s=>String(s.id)===String(id));
+    if(found){ source=cls; student=found; break; }
+  }
+  if(!source || !student) return;
+
+  const idx=order.indexOf(source.className);
   if(idx<0) return;
 
-  if(source.className==="Class 5"){
-    if(!db.graduatedStudents) db.graduatedStudents=[];
-    db.graduatedStudents.push({...student,graduatedClass:"Class 5",graduatedDate:new Date().toISOString()});
-    source.students=source.students.filter(s=>s.id!==id);
-    persist(); render(); toast("Student graduated");
+  const oldClass=source.className;
+
+  // Class 5 is the final class. Promoting from here means the student
+  // graduates/leaves the active class list; keep the rest of promotion logic untouched.
+  if(idx===order.length-1){
+    promotionInProgress=true;
+    try{
+      await removeStudentClassResults(student, oldClass);
+      source.students=source.students.filter(s=>String(s.id)!==String(id));
+      updateStudentHistoryCount(oldClass,source.students);
+
+      localStorage.setItem("edufunds_db",JSON.stringify(db));
+      if(schoolDataRef){
+        const studentMap=(Array.isArray(db.students)?db.students:[]).reduce((obj,cls)=>{
+          obj[cls.className]=cls;
+          return obj;
+        },{});
+        await schoolDataRef.update({
+          "appData/students":studentMap,
+          "appData/studentHistory":Array.isArray(db.studentHistory)?db.studentHistory:[]
+        });
+      }
+      render();
+      toast("Class 5 student promoted / graduated");
+    }catch(e){
+      console.error("Class 5 promotion error:",e);
+      toast("Promotion failed — please try again");
+    }finally{
+      promotionInProgress=false;
+    }
     return;
   }
 
-  let nextClass=order[idx+1];
-  let target=db.students.find(s=>s.className===nextClass);
-  if(!target){ target={id:"students_"+nextClass,className:nextClass,students:[]}; db.students.push(target); }
-  if(!Array.isArray(target.students)) target.students=[];
-  if(!student.academicHistory) student.academicHistory=[];
-  student.academicHistory.push({
-    className: source.className,
-    promotedDate: new Date().toISOString()
-  });
-  target.students.push({...student,previousClass:source.className,currentClass:nextClass});
-  source.students=source.students.filter(s=>s.id!==id);
-  persist(); render(); toast("Student promoted to "+nextClass);
+  const nextClass=order[idx+1];
+  promotionInProgress=true;
+
+  try{
+    // Delete ONLY this student's old-class results, and wait until Firebase confirms it.
+    await removeStudentClassResults(student, oldClass);
+
+    let target=db.students.find(s=>s.className===nextClass);
+    if(!target){
+      target={id:"students_"+nextClass,className:nextClass,students:[]};
+      db.students.push(target);
+    }
+    if(!Array.isArray(target.students)) target.students=[];
+
+    // Remove any stale duplicate with this ID before adding to the destination class.
+    target.students=target.students.filter(s=>String(s.id)!==String(student.id));
+    target.students.push({...student,previousClass:oldClass,currentClass:nextClass});
+    source.students=source.students.filter(s=>String(s.id)!==String(id));
+
+    updateStudentHistoryCount(oldClass,source.students);
+    updateStudentHistoryCount(nextClass,target.students);
+
+    // Save the class move DIRECTLY and wait for Firebase. Do not use the delayed
+    // global persist here; promotion must be one completed operation.
+    localStorage.setItem("edufunds_db",JSON.stringify(db));
+    if(schoolDataRef){
+      const studentMap=(Array.isArray(db.students)?db.students:[]).reduce((obj,cls)=>{
+        obj[cls.className]=cls;
+        return obj;
+      },{});
+      await schoolDataRef.update({
+        "appData/students":studentMap,
+        "appData/studentHistory":Array.isArray(db.studentHistory)?db.studentHistory:[]
+      });
+    }
+    // Keep the current screen stable; the promoted student disappears from old class
+    // immediately and no second click is required.
+    render();
+    toast("Student promoted");
+  }catch(e){
+    console.error("Promotion error:",e);
+    toast("Promotion failed — please try again");
+  }finally{
+    promotionInProgress=false;
+  }
 }
 
-function deleteStudent(id){
- let r=db.students.find(s=>s.className===currentClass);
- if(r&&Array.isArray(r.students)){r.students=r.students.filter(x=>x.id!==id);persist();render();toast("Student deleted");}
+let studentDeleteInProgress=false;
+async function deleteStudent(id){
+  if(studentDeleteInProgress) return;
+
+  // Always locate the student's real current class by ID.
+  let source=null;
+  let student=null;
+  for(const cls of (Array.isArray(db.students)?db.students:[])){
+    if(!Array.isArray(cls.students)) continue;
+    const found=cls.students.find(x=>String(x.id)===String(id));
+    if(found){ source=cls; student=found; break; }
+  }
+  if(!source || !student) return;
+
+  studentDeleteInProgress=true;
+  try{
+    const sourceClass=source.className;
+    const wantedClass=String(sourceClass||"").trim().toLowerCase();
+    const deletePaths=[];
+
+    // First discover the exact Firebase result path(s), but do not delete yet.
+    // This prevents the results listener from reloading the still-existing student
+    // between two separate Firebase operations (the cause of the required 2nd click).
+    if(realtimeDB && schoolDataRef){
+      const resultRoot=realtimeDB.ref("school/main/results");
+      const snap=await resultRoot.once("value");
+      const all=snap.exists()?(snap.val()||{}):{};
+
+      Object.keys(all).forEach(classKey=>{
+        let decodedClass=classKey;
+        try{ decodedClass=decodeURIComponent(classKey); }catch(_){}
+        if(String(decodedClass).trim().toLowerCase()!==wantedClass) return;
+        const students=all[classKey];
+        if(!students || typeof students!=="object") return;
+
+        Object.keys(students).forEach(studentKey=>{
+          let decodedName=studentKey;
+          try{ decodedName=decodeURIComponent(studentKey); }catch(_){}
+          const studentNode=students[studentKey];
+          let matched=String(decodedName)===String(student.name);
+          if(!matched && studentNode && typeof studentNode==="object"){
+            outer: for(const typeKey of Object.keys(studentNode)){
+              const typeNode=studentNode[typeKey];
+              if(!typeNode || typeof typeNode!=="object") continue;
+              for(const recordKey of Object.keys(typeNode)){
+                const rec=typeNode[recordKey];
+                if(rec && typeof rec==="object" && String(rec.studentId)===String(student.id)){
+                  matched=true; break outer;
+                }
+              }
+            }
+          }
+          if(matched) deletePaths.push("results/"+classKey+"/"+studentKey);
+        });
+      });
+    }
+
+    // Remove student locally before the single Firebase write.
+    source.students=source.students.filter(x=>String(x.id)!==String(id));
+    updateStudentHistoryCount(sourceClass,source.students);
+
+    // Clean the local result cache too.
+    if(db.results && typeof db.results==="object"){
+      Object.keys(db.results).forEach(classKey=>{
+        let decodedClass=classKey;
+        try{ decodedClass=decodeURIComponent(classKey); }catch(_){}
+        if(String(decodedClass).trim().toLowerCase()!==wantedClass) return;
+        const branch=db.results[classKey];
+        if(!branch || typeof branch!=="object") return;
+        Object.keys(branch).forEach(studentKey=>{
+          let decodedName=studentKey;
+          try{ decodedName=decodeURIComponent(studentKey); }catch(_){}
+          if(String(decodedName)===String(student.name)) delete branch[studentKey];
+        });
+      });
+    }
+
+    localStorage.setItem("edufunds_db",JSON.stringify(db));
+
+    if(schoolDataRef){
+      const studentMap=(Array.isArray(db.students)?db.students:[]).reduce((obj,cls)=>{
+        obj[cls.className]=cls;
+        return obj;
+      },{});
+      const updates={
+        "appData/students":studentMap,
+        "appData/studentHistory":Array.isArray(db.studentHistory)?db.studentHistory:[]
+      };
+      // Student removal + result removal happen in ONE Firebase update.
+      deletePaths.forEach(path=>{ updates[path]=null; });
+      await schoolDataRef.update(updates);
+    }
+
+    render();
+    toast("Student and result deleted");
+  }catch(e){
+    console.error("Student delete error:",e);
+    toast("Student delete failed — please try again");
+  }finally{
+    studentDeleteInProgress=false;
+  }
 }
 
 let activeReportTab="financial";
@@ -2605,8 +2892,16 @@ function resetData(){
     settings:{schoolName:"GPS NO.2 MULTAN KHURD",academicYear:"2026-27",adminName:"Administrator"}
   };
   persist();
+  // Remove only Firebase results path. Funds remain untouched.
+  try{
+    if(firebaseStarted && realtimeDB){
+      realtimeDB.ref("school/main/results").remove();
+    }
+  }catch(e){
+    console.error("Results reset error:", e);
+  }
   render();
-  toast("All school data reset");
+  toast("School data reset (Results cleared)");
 }
 $("todayText").textContent=new Date().toLocaleDateString("en-PK",{day:"2-digit",month:"short",year:"numeric"});
 document.addEventListener("keydown",e=>{if(e.key==="Escape")document.querySelectorAll(".modal").forEach(m=>m.classList.remove("show"))});
@@ -2899,7 +3194,7 @@ function saveResultRecord(studentId,name){
  // Save ONLY Results to Firebase (separate path). Other modules remain unchanged.
  try{
    if(realtimeDB){
-     realtimeDB.ref("school/main/results/"+encodeURIComponent(r.name)+"/"+encodeURIComponent(r.type)+"/"+r.id).set(r)
+     realtimeDB.ref("school/main/results/"+encodeURIComponent(r.className||"Unknown")+"/"+encodeURIComponent(r.name)+"/"+encodeURIComponent(r.type)+"/"+r.id).set(r)
        .catch(err=>console.error("Result Firebase save error:",err));
    }
  }catch(err){
@@ -2949,26 +3244,73 @@ function getStudentResultClassHistory(studentId){
   return [...new Set(classes.filter(Boolean))];
 }
 
-function viewResultRecord(studentId){
+async function viewResultRecord(studentId){
   window.currentResultStudentId = studentId;
 
-  const allResults = JSON.parse(localStorage.getItem('resultRecords')||'[]');
-  const rows = allResults.filter(r => String(r.studentId) === String(studentId));
+  let allResults = [];
+  try{
+    if(realtimeDB){
+      const snap = await realtimeDB.ref("school/main/results").once("value");
+      const raw = snap.val() || {};
+      Object.keys(raw).forEach(classKey=>{
+        const classNode = raw[classKey] || {};
+        Object.keys(classNode).forEach(studentKey=>{
+          const studentNode = classNode[studentKey] || {};
+          Object.keys(studentNode).forEach(typeKey=>{
+            const typeNode = studentNode[typeKey] || {};
+            Object.keys(typeNode).forEach(idKey=>{
+              const item = typeNode[idKey];
+              if(item) allResults.push(item);
+            });
+          });
+        });
+      });
+    }
+  }catch(e){
+    console.error("Firebase result load error",e);
+  }
+  const rows = allResults.filter(r => String(r.studentId) === String(studentId) || String(r.name) === String(studentId));
   window.currentStudentResults = rows;
 
+  // Load student basic data LIVE from Firebase so the same Name/Father Name/Class
+  // appears on every mobile/browser. localStorage is only an offline fallback.
   let student={name:'-', fatherName:'-', className:'-'};
+  let liveStudentFound=false;
   try{
-    const db=JSON.parse(localStorage.getItem('edufunds_db')||'{}');
-    (db.students||[]).forEach(group=>{
-      (group.students||[]).forEach(s=>{
-        if(String(s.id)===String(studentId)){
-          student.name=s.name||'-';
-          student.fatherName=s.fatherName||s.father||'-';
-          student.className=group.className||'-';
-        }
+    if(realtimeDB){
+      const studentSnap = await realtimeDB.ref("school/main/appData/students").once("value");
+      const groups = studentSnap.val() || {};
+      const groupList = Array.isArray(groups) ? groups : Object.values(groups);
+      groupList.forEach(group=>{
+        if(!group || liveStudentFound) return;
+        const list = Array.isArray(group.students) ? group.students : Object.values(group.students||{});
+        list.forEach(s=>{
+          if(!s || liveStudentFound) return;
+          if(String(s.id||s.studentId)===String(studentId)){
+            student.name=s.name||'-';
+            student.fatherName=s.fatherName||s.father||'-';
+            student.className=group.className||s.className||'-';
+            liveStudentFound=true;
+          }
+        });
       });
-    });
-  }catch(e){}
+    }
+  }catch(e){ console.error("Firebase student basic data load error",e); }
+
+  if(!liveStudentFound){
+    try{
+      const localDb=JSON.parse(localStorage.getItem('edufunds_db')||'{}');
+      (localDb.students||[]).forEach(group=>{
+        (group.students||[]).forEach(s=>{
+          if(String(s.id||s.studentId)===String(studentId)){
+            student.name=s.name||'-';
+            student.fatherName=s.fatherName||s.father||'-';
+            student.className=group.className||s.className||'-';
+          }
+        });
+      });
+    }catch(e){}
+  }
 
   let box=document.getElementById("studentResultView");
   if(!box){
@@ -2997,16 +3339,13 @@ function viewResultRecord(studentId){
         <option value="Term Wise">Term Wise</option>
         <option value="Final Exam">Final Exam</option>
       </select>
-      <select id="resultClassHistoryFilter" onchange="filterStudentClassHistory()" style="width:100%;padding:12px;border-radius:10px;margin-bottom:15px">
-        <option value="">Select Class History</option>
-      </select>
       <div id="studentResultList"></div>
       <div class="teacher-remarks-box" id="resultTeacherRemarks" style="display:none;margin-top:20px">
         <h4>Teacher Remarks</h4>
         <textarea id="teacherRemarks" placeholder="Write teacher remarks here..."></textarea>\n        <button class="generate-report-card-btn no-print" onclick="generateReportCard()" style="margin-top:15px;padding:10px 18px;border-radius:10px;border:0;cursor:pointer">Generate Report Card</button>
       </div>
     </div>`;
-  loadStudentClassHistory(studentId);
+
 }
 
 
@@ -3055,12 +3394,36 @@ function loadStudentClassHistory(studentId){
   el.innerHTML='<option value="">Select Class History</option>'+
     unique.map(c=>`<option value="${c}">${c}</option>`).join('');
 }
-function filterStudentClassHistory(){
+async function filterStudentClassHistory(){
   const c=document.getElementById('resultClassHistoryFilter')?.value;
-  if(!c){ window.currentStudentResults=JSON.parse(localStorage.getItem('resultRecords')||'[]').filter(r=>String(r.studentId)===String(window.currentResultStudentId)); return; }
-  window.currentStudentResults=(JSON.parse(localStorage.getItem('resultRecords')||'[]')).filter(r=>String(r.studentId)===String(window.currentResultStudentId) && String(r.className)===String(c));
+  // Always keep the live Firebase loaded results. Do not reload old local cache.
+  let live = window.currentStudentResults || [];
+  if(!live.length && window.currentResultStudentId){
+    try{
+      const snap = await realtimeDB.ref("school/main/results").once("value");
+      const raw = snap.val() || {};
+      live=[];
+      Object.keys(raw).forEach(c=>{
+        Object.keys(raw[c]||{}).forEach(st=>{
+          Object.keys(raw[c][st]||{}).forEach(t=>{
+            Object.keys(raw[c][st][t]||{}).forEach(id=>{
+              const item=raw[c][st][t][id];
+              if(item && (String(item.studentId)===String(window.currentResultStudentId) || String(item.name)===String(window.currentResultStudentId))) live.push(item);
+            });
+          });
+        });
+      });
+    }catch(e){console.error(e)}
+  }
+  // Class history filter: match class when available, but keep promoted students' results linked by studentId
+  // because old results may contain previous className after promotion.
+  window.currentStudentResults = c ? live.filter(r=>{
+    const rc = String(r.className||'').toUpperCase();
+    const selected = String(c||'').toUpperCase();
+    return rc === selected || !rc;
+  }) : live;
   const t=document.getElementById('resultTypeFilter');
-  if(t && t.value) filterStudentResults(t.value);
+  if(t && t.value) filterStudentResults(t.value); else renderStudentResults();
 }
 
 
@@ -3530,19 +3893,37 @@ function renderFullResult(type){
 
 <script id="final-view-page-override">
 (function(){
-window.openStudentResultFullPage = function(studentId){
-    const db = JSON.parse(localStorage.getItem('edufunds_db') || '{}');
+window.openStudentResultFullPage = async function(studentId){
     let student = {name:'', fatherName:'', className:''};
-
-    (db.students || []).forEach(g=>{
-        (g.students || []).forEach(s=>{
-            if(String(s.id)===String(studentId)){
-                student.name=s.name||'';
-                student.fatherName=s.fatherName||s.father||'';
-                student.className=g.className||s.className||'';
+    let liveStudentFound=false;
+    try{
+      if(realtimeDB){
+        const snap=await realtimeDB.ref("school/main/appData/students").once("value");
+        const groups=snap.val()||{};
+        (Array.isArray(groups)?groups:Object.values(groups)).forEach(g=>{
+          if(!g||liveStudentFound) return;
+          const list=Array.isArray(g.students)?g.students:Object.values(g.students||{});
+          list.forEach(s=>{
+            if(s && !liveStudentFound && String(s.id||s.studentId)===String(studentId)){
+              student.name=s.name||'';
+              student.fatherName=s.fatherName||s.father||'';
+              student.className=g.className||s.className||'';
+              liveStudentFound=true;
             }
+          });
         });
-    });
+      }
+    }catch(e){ console.error("Firebase student basic data load error",e); }
+    if(!liveStudentFound){
+      try{
+        const localDb=JSON.parse(localStorage.getItem('edufunds_db')||'{}');
+        (localDb.students||[]).forEach(g=>(g.students||[]).forEach(s=>{
+          if(String(s.id||s.studentId)===String(studentId)){
+            student.name=s.name||''; student.fatherName=s.fatherName||s.father||''; student.className=g.className||s.className||'';
+          }
+        }));
+      }catch(e){}
+    }
 
     const results = JSON.parse(localStorage.getItem('resultRecords') || '[]')
         .filter(r=>String(r.studentId||r.sid||'')===String(studentId));
